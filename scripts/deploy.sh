@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Atualiza a aplicação na VPS: baixa a main, aplica migrations e recria os containers.
+# Atualiza a aplicação na VPS: baixa a main e as imagens, aplica migrations e recria os containers.
 # Uso (dentro da pasta do projeto na VPS): ./scripts/deploy.sh
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -12,8 +12,16 @@ fi
 echo "==> Baixando a main"
 git pull --ff-only origin main
 
-echo "==> Construindo e subindo (postgres -> migrate -> web)"
-docker compose up -d --build --remove-orphans
+if grep -qE '^WEB_IMAGE=.+' .env; then
+  # Imagens construídas pelo GitHub Actions: a VPS só baixa (sem build, sem pico de memória).
+  echo "==> Baixando imagens prontas"
+  docker compose pull migrate web
+  echo "==> Subindo (postgres -> migrate -> web)"
+  docker compose up -d --no-build --remove-orphans
+else
+  echo "==> Construindo na própria máquina e subindo (postgres -> migrate -> web)"
+  docker compose up -d --build --remove-orphans
+fi
 
 echo "==> Aguardando o app ficar saudável"
 for _ in $(seq 1 60); do
