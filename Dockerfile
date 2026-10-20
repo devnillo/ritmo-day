@@ -17,6 +17,10 @@ RUN --mount=type=cache,id=ritmo-pnpm-store,target=/pnpm/store \
     pnpm install --frozen-lockfile --store-dir /pnpm/store --fetch-timeout 600000 --network-concurrency 4
 
 FROM deps AS builder
+# VPS pequena: deixa o Node usar até 2 GB (RAM + swap) em vez do limite automático (~250 MB com 1 GB de RAM)
+# e gera as páginas com um processo só.
+ENV NODE_OPTIONS=--max-old-space-size=2048 \
+    NEXT_BUILD_CPUS=1
 COPY . .
 RUN pnpm exec prisma generate && pnpm exec next build
 

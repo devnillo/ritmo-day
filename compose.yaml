@@ -23,8 +23,6 @@ services:
 
   # Aplica as migrations versionadas e termina. O web só sobe se ele terminar com sucesso.
   migrate:
-    # Na VPS, MIGRATE_IMAGE/WEB_IMAGE apontam para as imagens prontas do GitHub (docs/DEPLOY.md).
-    image: ${MIGRATE_IMAGE:-ritmo-migrate}
     build:
       context: .
       target: migrate
@@ -36,7 +34,6 @@ services:
     restart: "no"
 
   web:
-    image: ${WEB_IMAGE:-ritmo-web}
     build:
       context: .
       target: runner

@@ -1,16 +1,14 @@
 # Deploy na VPS
 
-O Ritmo roda inteiro com Docker Compose: `postgres` → `migrate` (aplica as migrations e termina) → `web`.
+Tudo roda na VPS com Docker Compose: `postgres` → `migrate` (aplica as migrations e termina) → `web`.
 Só a porta do app (`WEB_PORT`) fica exposta. O banco não abre porta nenhuma.
 
-**A VPS não constrói o app.** Construir um app Next.js precisa de alguns GB de RAM. A cada push na `main`, o
-GitHub Actions (`.github/workflows/ci.yml`) roda lint, tipos e testes, constrói as imagens e as publica no
-GitHub Container Registry (`ghcr.io/devnillo/ritmo-day-web` e `-migrate`). A VPS só baixa e roda. Para rodar,
-cerca de 512 MB de RAM livres bastam.
-
-## Requisitos na VPS
+## Requisitos
 
 - Docker com Docker Compose v2 (`docker compose version`) e git.
+- Memória para o build: o `next build` usa até ~1,5 GB. Com RAM + swap abaixo de 3 GB, o `deploy.sh` para
+  antes de começar e pede para criar a swap (passo 2).
+- Cerca de 6 GB livres em disco.
 
 ## 1. Acesso ao repositório (uma vez)
 
@@ -33,13 +31,13 @@ Host github-ritmo
 EOF
 ```
 
-## 2. Acesso às imagens (uma vez)
+## 2. Swap (uma vez, se a VPS tiver pouca RAM)
 
-As imagens são privadas, como o repositório. Crie um token no GitHub em **Settings → Developer settings →
-Personal access tokens → Tokens (classic)** com só o escopo `read:packages`, e na VPS:
+Swap é memória extra em disco: deixa o build terminar numa VPS pequena. O script só cria se ainda não
+houver swap e deixa configurado para usá-la só quando a RAM acabar.
 
 ```bash
-docker login ghcr.io -u devnillo        # cole o token quando pedir a senha
+sudo ./scripts/vps-swap.sh 4G
 ```
 
 ## 3. Primeira instalação
@@ -48,20 +46,22 @@ docker login ghcr.io -u devnillo        # cole o token quando pedir a senha
 cd ~/projetos                                       # a pasta onde ficam seus projetos
 git clone git@github-ritmo:devnillo/ritmo-day.git ritmo
 cd ritmo
+sudo ./scripts/vps-swap.sh 4G                       # se ainda não tiver swap
 ./scripts/vps-env.sh IP_DA_VPS 3010                 # escolha uma porta livre
 ./scripts/deploy.sh
 ```
 
-O `vps-env.sh` cria o `.env` com senha do banco, segredos aleatórios e o endereço das imagens. O `deploy.sh`
-baixa as imagens, sobe tudo e espera o health check. No fim, o app responde em `http://IP_DA_VPS:3010`.
+O `vps-env.sh` cria o `.env` com senha do banco e segredos aleatórios. O `deploy.sh` confere memória e disco,
+constrói as imagens (uma por vez), sobe tudo e espera o health check. No fim, o app responde em
+`http://IP_DA_VPS:3010`.
 
-> **Já tinha criado o `.env` antes?** Acrescente as duas linhas abaixo (o `deploy.sh` só usa as imagens prontas
-> quando `WEB_IMAGE` está definido; sem ela, tenta construir na própria VPS):
->
-> ```bash
-> echo 'WEB_IMAGE=ghcr.io/devnillo/ritmo-day-web:latest' >> .env
-> echo 'MIGRATE_IMAGE=ghcr.io/devnillo/ritmo-day-migrate:latest' >> .env
-> ```
+Numa VPS pequena o primeiro build demora (pode passar de meia hora). Rode dentro de `tmux` para não perder o
+processo se a conexão SSH cair:
+
+```bash
+tmux new -s deploy          # depois: ./scripts/deploy.sh
+# se cair: ssh de novo e  tmux attach -t deploy
+```
 
 Se a VPS usa firewall (ufw), libere a porta: `sudo ufw allow 3010/tcp`.
 
@@ -70,32 +70,16 @@ Se a VPS usa firewall (ufw), libere a porta: `sudo ufw allow 3010/tcp`.
 
 ## 4. Atualizar
 
-Tudo vai para a `main`. Depois do `git push`, espere o workflow **CI e imagens** ficar verde (aba Actions do
-repositório ou `gh run watch`) e, na VPS:
+Depois de cada `git push` na `main`, na VPS:
 
 ```bash
 cd ~/projetos/ritmo && ./scripts/deploy.sh
 ```
 
-O script faz `git pull`, baixa as imagens novas, aplica migrations novas e recria o app. Leva cerca de um
-minuto. Os dados do banco ficam no volume `ritmo_pgdata` e não se perdem.
-
-### Deploy automático (opcional)
-
-Para o próprio GitHub rodar o `deploy.sh` depois de publicar as imagens:
-
-1. Na VPS, gere uma chave só para isso e autorize-a: `ssh-keygen -t ed25519 -f ~/.ssh/ritmo_actions -N ""` e
-   `cat ~/.ssh/ritmo_actions.pub >> ~/.ssh/authorized_keys`.
-2. No GitHub, em **Settings → Secrets and variables → Actions**:
-   - *Secret* `VPS_SSH_KEY`: conteúdo de `~/.ssh/ritmo_actions` (a chave privada).
-   - *Variables* `VPS_HOST` (IP), `VPS_USER` (usuário), `VPS_APP_DIR` (ex.: `/home/usuario/projetos/ritmo`) e,
-     se a porta do SSH não for 22, `VPS_SSH_PORT`.
-
-Enquanto `VPS_HOST` não existir, o job de deploy é simplesmente pulado.
+O script faz `git pull`, reconstrói, aplica migrations novas e recria o app. Os builds seguintes aproveitam o
+cache e costumam ser mais rápidos. Os dados do banco ficam no volume `ritmo_pgdata` e não se perdem.
 
 ## Comandos úteis
-
-Rode deploys longos dentro de `tmux` ou `screen`: se a conexão SSH cair, o comando continua.
 
 ```bash
 docker compose ps                          # estado dos serviços
@@ -103,6 +87,7 @@ docker compose logs -f web                 # logs do app
 docker compose logs migrate                # saída das migrations
 docker compose restart web                 # reinicia só o app
 docker compose down                        # para tudo (os dados continuam no volume)
+docker builder prune -f                    # libera o cache de build (não apaga dados)
 ```
 
 ## Backup e restauração
@@ -137,9 +122,8 @@ ou Nginx + Let's Encrypt) na frente da porta do app. Depois disso, troque o `BET
 
 | Sintoma | Causa provável |
 |---|---|
+| `deploy.sh` para em "Memória insuficiente" | Crie a swap: `sudo ./scripts/vps-swap.sh 4G` |
+| `JavaScript heap out of memory` no build | Swap pequena ou outros projetos usando a RAM: aumente a swap |
 | Login ou cadastro falha com "Invalid origin" | `BETTER_AUTH_URL` diferente do endereço aberto no navegador |
 | `web` não sobe e `migrate` saiu com erro | Veja `docker compose logs migrate` (geralmente banco ou `.env`) |
-| `denied` ou `unauthorized` ao baixar imagens | Falta o `docker login ghcr.io` (passo 2) ou o token expirou |
-| `deploy.sh` começa a construir na VPS | Faltam `WEB_IMAGE`/`MIGRATE_IMAGE` no `.env` |
-| `manifest unknown` | O workflow ainda não terminou ou falhou: veja a aba Actions |
 | Porta já em uso | Outro projeto usa a mesma porta: mude `WEB_PORT` e `BETTER_AUTH_URL` no `.env` |

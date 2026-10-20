@@ -17,9 +17,6 @@ if [ -e .env ]; then
   exit 1
 fi
 
-# Imagens publicadas pelo GitHub Actions para este repositório (ex.: ghcr.io/devnillo/ritmo-day-web).
-REPO="$(git remote get-url origin 2>/dev/null | sed -E 's#^.*[:/]([^/]+/[^/]+)$#\1#; s#\.git$##' | tr '[:upper:]' '[:lower:]')"
-
 # Hex evita caracteres que precisariam de escape na URL do banco.
 DB_PASSWORD="$(openssl rand -hex 24)"
 
@@ -30,9 +27,6 @@ POSTGRES_PASSWORD=${DB_PASSWORD}
 POSTGRES_DB=ritmo
 
 WEB_PORT=${PORT}
-# Imagens prontas do GitHub (construídas no Actions). Sem estas linhas, o deploy.sh constrói aqui.
-WEB_IMAGE=ghcr.io/${REPO}-web:latest
-MIGRATE_IMAGE=ghcr.io/${REPO}-migrate:latest
 BETTER_AUTH_URL=http://${HOST}:${PORT}
 BETTER_AUTH_SECRET=$(openssl rand -base64 32)
 PASSWORD_BREACH_CHECK=true
