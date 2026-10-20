@@ -1,0 +1,7 @@
+allowBuilds:
+  sharp: false
+  unrs-resolver: false
+  "@prisma/engines": true
+  prisma: true
+  # O binário do esbuild vem do pacote opcional da plataforma; o postinstall não é necessário.
+  esbuild: false

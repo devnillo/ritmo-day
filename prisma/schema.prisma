@@ -1,0 +1,337 @@
+// Schema do Ritmo. Modelo-alvo completo em docs/SPEC.md §16.
+// Convenções: IDs uuid v7 gerados pelo Postgres, instantes em timestamptz (UTC),
+// datas de calendário como date, horários do dia em minutos desde 00:00, nomes de tabela/coluna em snake_case.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Theme {
+  SYSTEM
+  LIGHT
+  DARK
+
+  @@map("theme")
+}
+
+// Campos id, name, email, emailVerified, image, createdAt e updatedAt seguem o
+// formato esperado pelo Better Auth (Fase 2).
+model User {
+  id             String    @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  name           String
+  email          String    @unique
+  emailVerified  Boolean   @default(false) @map("email_verified")
+  image          String?
+  // Fuso IANA usado para calcular o "dia" do usuário (SPEC D5).
+  timezone       String    @default("America/Sao_Paulo")
+  locale         String    @default("pt-BR")
+  ageConfirmedAt DateTime? @map("age_confirmed_at") @db.Timestamptz
+  lastSeenAt     DateTime? @map("last_seen_at") @db.Timestamptz
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt      DateTime  @updatedAt @map("updated_at") @db.Timestamptz
+
+  preferences UserPreferences?
+  sessions    Session[]
+  accounts    Account[]
+  habits      Habit[]
+  routines    Routine[]
+  occurrences HabitOccurrence[]
+  dayStates   DayState[]
+  checkIns    DailyCheckIn[]
+  onboarding  OnboardingState?
+
+  @@map("users")
+}
+
+model UserPreferences {
+  userId               String   @id @map("user_id") @db.Uuid
+  theme                Theme    @default(SYSTEM)
+  // 0 = domingo, 1 = segunda.
+  weekStartsOn         Int      @default(0) @map("week_starts_on") @db.SmallInt
+  // Horários do dia em minutos desde 00:00 (0–1439), no fuso do usuário.
+  preferredDayStart    Int?     @map("preferred_day_start") @db.SmallInt
+  preferredDayEnd      Int?     @map("preferred_day_end") @db.SmallInt
+  notificationsEnabled Boolean  @default(false) @map("notifications_enabled")
+  aiConsent            Boolean  @default(false) @map("ai_consent")
+  createdAt            DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt            DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  // Cascade intencional a partir de User: direito de exclusão (LGPD).
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("user_preferences")
+}
+
+// --- Tabelas do Better Auth (SPEC D1). Campos e nomes seguem o formato da biblioteca. ---
+
+model Session {
+  id        String   @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  // Token opaco; o cookie é assinado com BETTER_AUTH_SECRET.
+  token     String   @unique
+  expiresAt DateTime @map("expires_at") @db.Timestamptz
+  ipAddress String?  @map("ip_address")
+  userAgent String?  @map("user_agent")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("sessions")
+}
+
+// Credenciais e vínculos com provedores. Para e-mail e senha, providerId = "credential"
+// e "password" guarda o hash Argon2id.
+model Account {
+  id                    String    @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  userId                String    @map("user_id") @db.Uuid
+  accountId             String    @map("account_id")
+  providerId            String    @map("provider_id")
+  accessToken           String?   @map("access_token")
+  refreshToken          String?   @map("refresh_token")
+  idToken               String?   @map("id_token")
+  accessTokenExpiresAt  DateTime? @map("access_token_expires_at") @db.Timestamptz
+  refreshTokenExpiresAt DateTime? @map("refresh_token_expires_at") @db.Timestamptz
+  scope                 String?
+  password              String?
+  createdAt             DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt             DateTime  @updatedAt @map("updated_at") @db.Timestamptz
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([providerId, accountId])
+  @@index([userId])
+  @@map("accounts")
+}
+
+// Tokens de verificação de e-mail e de redefinição de senha (uso único, com expiração).
+model Verification {
+  id         String   @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  identifier String
+  value      String
+  expiresAt  DateTime @map("expires_at") @db.Timestamptz
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt  DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  @@index([identifier])
+  @@map("verifications")
+}
+
+// Contadores do rate limit (SPEC D8), guardados no Postgres para valer entre instâncias.
+model RateLimit {
+  id          String @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  key         String @unique
+  count       Int
+  lastRequest BigInt @map("last_request")
+
+  @@map("rate_limits")
+}
+
+// --- Hábitos, rotinas e registros (SPEC §12, D2–D6) ---
+
+enum HabitCategory {
+  SELF_CARE
+  SLEEP
+  FOOD
+  EXERCISE
+  ORGANIZATION
+  STUDY
+  WORK
+  LEISURE
+  CUSTOM
+
+  @@map("habit_category")
+}
+
+enum FrequencyType {
+  DAILY
+  WEEKDAYS
+  TIMES_PER_WEEK
+
+  @@map("frequency_type")
+}
+
+enum DayPeriod {
+  MORNING
+  AFTERNOON
+  EVENING
+  ANYTIME
+
+  @@map("day_period")
+}
+
+enum Effort {
+  LIGHT
+  MODERATE
+  DEMANDING
+
+  @@map("effort")
+}
+
+// Não existe PENDING: pendente é a ausência de registro (D2). Não existe MISSED automático (D3).
+enum OccurrenceStatus {
+  COMPLETED
+  PARTIAL
+  SKIPPED
+  POSTPONED
+
+  @@map("occurrence_status")
+}
+
+enum OccurrenceSource {
+  TODAY
+  HABIT_PAGE
+  ASSISTANT
+  IMPORT
+
+  @@map("occurrence_source")
+}
+
+model Habit {
+  id               String        @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  userId           String        @map("user_id") @db.Uuid
+  name             String
+  description      String?
+  category         HabitCategory @default(CUSTOM)
+  frequencyType    FrequencyType @default(DAILY) @map("frequency_type")
+  // Usado quando frequencyType = WEEKDAYS. 0 = domingo … 6 = sábado.
+  daysOfWeek       Int[]         @default([]) @map("days_of_week") @db.SmallInt
+  // Usado quando frequencyType = TIMES_PER_WEEK.
+  timesPerWeek     Int?          @map("times_per_week") @db.SmallInt
+  period           DayPeriod     @default(ANYTIME)
+  // Minutos desde 00:00, no fuso do usuário.
+  preferredTime    Int?          @map("preferred_time") @db.SmallInt
+  estimatedMinutes Int?          @map("estimated_minutes") @db.SmallInt
+  effort           Effort        @default(LIGHT)
+  minimumVersion   String?       @map("minimum_version")
+  // Aparece no Modo leve.
+  isEssential      Boolean       @default(false) @map("is_essential")
+  startDate        DateTime      @map("start_date") @db.Date
+  endDate          DateTime?     @map("end_date") @db.Date
+  position         Int           @default(0)
+  archivedAt       DateTime?     @map("archived_at") @db.Timestamptz
+  createdAt        DateTime      @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt        DateTime      @updatedAt @map("updated_at") @db.Timestamptz
+
+  user        User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // Excluir um hábito (ação explícita e confirmada) apaga seus registros e vínculos.
+  // Para preservar o histórico, a interface oferece arquivar.
+  occurrences HabitOccurrence[]
+  routines    RoutineHabit[]
+
+  @@index([userId, archivedAt, position])
+  @@map("habits")
+}
+
+model Routine {
+  id          String     @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  userId      String     @map("user_id") @db.Uuid
+  name        String
+  description String?
+  period      DayPeriod?
+  position    Int        @default(0)
+  pausedAt    DateTime?  @map("paused_at") @db.Timestamptz
+  createdAt   DateTime   @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt   DateTime   @updatedAt @map("updated_at") @db.Timestamptz
+
+  user   User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  habits RoutineHabit[]
+
+  @@index([userId, position])
+  @@map("routines")
+}
+
+model RoutineHabit {
+  routineId String @map("routine_id") @db.Uuid
+  habitId   String @map("habit_id") @db.Uuid
+  position  Int    @default(0)
+
+  routine Routine @relation(fields: [routineId], references: [id], onDelete: Cascade)
+  habit   Habit   @relation(fields: [habitId], references: [id], onDelete: Cascade)
+
+  @@id([routineId, habitId])
+  @@index([habitId])
+  @@map("routine_habits")
+}
+
+// Um registro por hábito por dia local. Só existe quando a pessoa age (D2).
+model HabitOccurrence {
+  id          String           @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  userId      String           @map("user_id") @db.Uuid
+  habitId     String           @map("habit_id") @db.Uuid
+  localDate   DateTime         @map("local_date") @db.Date
+  status      OccurrenceStatus
+  // Para POSTPONED: dia em que o hábito volta a aparecer (D4).
+  postponedTo DateTime?        @map("postponed_to") @db.Date
+  completedAt DateTime?        @map("completed_at") @db.Timestamptz
+  note        String?
+  source      OccurrenceSource @default(TODAY)
+  createdAt   DateTime         @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt   DateTime         @updatedAt @map("updated_at") @db.Timestamptz
+
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  habit Habit @relation(fields: [habitId], references: [id], onDelete: Cascade)
+
+  @@unique([habitId, localDate])
+  @@index([userId, localDate])
+  @@index([userId, postponedTo])
+  @@map("habit_occurrences")
+}
+
+// Estado do dia (Modo leve), guardado para histórico sem rótulos clínicos (SPEC §13).
+model DayState {
+  userId    String   @map("user_id") @db.Uuid
+  localDate DateTime @map("local_date") @db.Date
+  lightMode Boolean  @default(false) @map("light_mode")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([userId, localDate])
+  @@map("day_states")
+}
+
+// --- Check-in diário (SPEC §14). Tudo opcional; um por dia local. ---
+
+model DailyCheckIn {
+  id            String   @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  userId        String   @map("user_id") @db.Uuid
+  localDate     DateTime @map("local_date") @db.Date
+  // 1 = muito ruim … 5 = muito bom.
+  mood          Int?     @db.SmallInt
+  // 1 a 5.
+  energy        Int?     @db.SmallInt
+  sleepMinutes  Int?     @map("sleep_minutes") @db.SmallInt
+  sleepQuality  Int?     @map("sleep_quality") @db.SmallInt
+  // Nota livre criptografada na aplicação (AES-256-GCM, SPEC D9). Nunca em texto puro.
+  noteEncrypted String?  @map("note_encrypted")
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt     DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, localDate])
+  @@map("daily_check_ins")
+}
+
+// --- Onboarding (SPEC §10). Respostas salvas a cada etapa para poder retomar. ---
+
+model OnboardingState {
+  userId      String    @id @map("user_id") @db.Uuid
+  step        Int       @default(0) @db.SmallInt
+  answers     Json      @default("{}")
+  completedAt DateTime? @map("completed_at") @db.Timestamptz
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt   DateTime  @updatedAt @map("updated_at") @db.Timestamptz
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("onboarding_states")
+}

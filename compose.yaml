@@ -1,0 +1,78 @@
+# Stack completa no modo produção: postgres → migrate → web.
+# Uso: docker compose up --build
+name: ritmo
+
+x-database-url: &database-url postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?defina POSTGRES_USER no .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?defina POSTGRES_PASSWORD no .env}
+      POSTGRES_DB: ${POSTGRES_DB:?defina POSTGRES_DB no .env}
+    # Sem "ports": o banco só é acessível pela rede interna do Compose.
+    volumes:
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Aplica as migrations versionadas e termina. O web só sobe se ele terminar com sucesso.
+  migrate:
+    build:
+      context: .
+      target: migrate
+    environment:
+      DATABASE_URL: *database-url
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  web:
+    build:
+      context: .
+      target: runner
+    init: true
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: *database-url
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?defina BETTER_AUTH_SECRET no .env}
+      BETTER_AUTH_URL: "${BETTER_AUTH_URL:?defina BETTER_AUTH_URL no .env, ex. http://IP:PORTA}"
+      DATA_ENCRYPTION_KEY: ${DATA_ENCRYPTION_KEY:?defina DATA_ENCRYPTION_KEY no .env}
+      PASSWORD_BREACH_CHECK: ${PASSWORD_BREACH_CHECK:-true}
+      # Local: Mailpit da própria stack. Em produção, aponte para o SMTP do provedor.
+      SMTP_URL: ${SMTP_URL_DOCKER:-smtp://mailpit:1025}
+      EMAIL_FROM: ${EMAIL_FROM:-Ritmo <nao-responda@ritmo.local>}
+    ports:
+      - "${WEB_PORT:-3000}:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    stop_grace_period: 20s
+
+  # Captura os e-mails localmente (http://localhost:8026). Remova em produção.
+  mailpit:
+    image: axllent/mailpit:v1.27
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${MAILPIT_UI_PORT:-8026}:8025"
+
+volumes:
+  pgdata:
